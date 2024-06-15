@@ -1,7 +1,3 @@
-Sure, I can help you create a creative and effective README file for your legal assist application. Here’s a draft with detailed steps and some creative elements:
-
----
-
 # 🏛️ Legal Assist - Lawmate
 
 Welcome to **Lawmate**, your personal legal assistant! Developed by the team **NLP Ninjas**: Rohith, Aakash, Sri Ram, and [Your Name]. This application leverages the power of Natural Language Processing to assist with legal queries and document analysis.
