@@ -1,6 +1,6 @@
 # 🏛️ Legal Assist - Lawmate
 
-Welcome to **Lawmate**, your personal legal assistant! Developed by the team **NLP Ninjas**: Rohith, Aakash, Sri Ram, and [Your Name]. This application leverages the power of Natural Language Processing to assist with legal queries and document analysis.
+Welcome to **Lawmate**, your personal legal assistant! Developed by the team **NLP Ninjas**: Me, Rohith, Aakash, Sri Ram, . This application leverages the power of Natural Language Processing to assist with legal queries and document analysis.
 
 🌐 **Deployed Application:** [lawmate.streamlit.app](https://lawmate.streamlit.app)
 
