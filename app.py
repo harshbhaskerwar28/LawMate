@@ -192,7 +192,7 @@ def get_conversational_chain():
     Answer:
     """
     model = ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash",  # Using stable model name
+        model="gemini-2.5-flash",  # Using stable model name
         temperature=0.3,
         max_output_tokens=1024,
         system_instruction="You are LawMate, a highly experienced attorney providing legal advice based on Indian laws. You will respond to the user's queries by leveraging your legal expertise and the Context Provided."
