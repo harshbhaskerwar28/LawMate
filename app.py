@@ -4,10 +4,11 @@ import pytesseract
 from PIL import Image
 from PyPDF2 import PdfReader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
 from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from dotenv import load_dotenv
 import google.generativeai as genai
 import streamlit as st
@@ -53,43 +54,65 @@ def get_image_text(image_files):
     return text
 
 def get_text_chunks(text):
-    # Reduced chunk size to avoid API limits
+    # Optimized chunk size for better performance
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=10000,  # Reduced from 50000
-        chunk_overlap=1000
+        chunk_size=1000,  # Smaller chunks for better embedding
+        chunk_overlap=200
     )
     chunks = text_splitter.split_text(text)
     return chunks
 
+@st.cache_resource
+def get_embeddings():
+    """Initialize embeddings model (cached to avoid reloading)"""
+    # Use a lightweight, free local embedding model
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",  # Fast and lightweight
+        model_kwargs={'device': 'cpu'},
+        encode_kwargs={'normalize_embeddings': True}
+    )
+    return embeddings
+
 def create_vector_store(text_chunks):
     try:
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        embeddings = get_embeddings()
         
-        # Process chunks in batches to avoid rate limits
-        batch_size = 10
-        all_embeddings = []
+        # Process in smaller batches with progress indicator
+        batch_size = 50  # Process 50 chunks at a time
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        all_vector_stores = []
+        total_batches = (len(text_chunks) + batch_size - 1) // batch_size
         
         for i in range(0, len(text_chunks), batch_size):
+            batch_num = i // batch_size + 1
             batch = text_chunks[i:i + batch_size]
+            
+            status_text.text(f"Processing batch {batch_num}/{total_batches}...")
+            
             try:
-                if i > 0:
-                    time.sleep(1)  # Add delay between batches
                 vector_store_batch = FAISS.from_texts(batch, embedding=embeddings)
-                all_embeddings.append(vector_store_batch)
+                all_vector_stores.append(vector_store_batch)
+                progress_bar.progress(batch_num / total_batches)
             except Exception as e:
-                st.warning(f"Error processing batch {i//batch_size + 1}: {str(e)}")
-                time.sleep(2)  # Wait longer on error
+                st.warning(f"Error processing batch {batch_num}: {str(e)}")
                 continue
         
-        if not all_embeddings:
+        progress_bar.empty()
+        status_text.empty()
+        
+        if not all_vector_stores:
             raise Exception("Failed to create any embeddings")
         
         # Merge all vector stores
-        vector_store = all_embeddings[0]
-        for vs in all_embeddings[1:]:
+        status_text.text("Merging vector stores...")
+        vector_store = all_vector_stores[0]
+        for vs in all_vector_stores[1:]:
             vector_store.merge_from(vs)
         
         vector_store.save_local("Faiss")
+        status_text.empty()
         return True
     except Exception as e:
         st.error(f"Error creating vector store: {str(e)}")
@@ -104,20 +127,25 @@ def ingest_data(uploaded_files=None):
             image_files = [f for f in uploaded_files if f.type in ["image/png", "image/jpeg", "image/jpg"]]
             
             if pdf_files:
-                pdf_text = get_pdf_text([io.BytesIO(pdf.read()) for pdf in pdf_files])
-                raw_text += pdf_text
+                with st.spinner("Extracting text from PDFs..."):
+                    pdf_text = get_pdf_text([io.BytesIO(pdf.read()) for pdf in pdf_files])
+                    raw_text += pdf_text
 
             if image_files:
-                image_text = get_image_text([io.BytesIO(image.read()) for image in image_files])
-                raw_text += image_text
+                with st.spinner("Extracting text from images..."):
+                    image_text = get_image_text([io.BytesIO(image.read()) for image in image_files])
+                    raw_text += image_text
             
             if not raw_text.strip():
                 st.warning("No text extracted from uploaded files.")
                 return False
             
+            st.info(f"Extracted {len(raw_text)} characters of text.")
             text_chunks = get_text_chunks(raw_text)
+            st.info(f"Created {len(text_chunks)} text chunks.")
+            
             if create_vector_store(text_chunks):
-                st.success("Files processed successfully!")
+                st.success("✅ Files processed successfully!")
                 return True
             return False
         else:
@@ -133,14 +161,16 @@ def ingest_data(uploaded_files=None):
                 st.info("No PDF files found in dataset folder.")
                 return False
             
-            raw_text = get_pdf_text(pdf_files)
+            with st.spinner("Processing dataset files..."):
+                raw_text = get_pdf_text(pdf_files)
+                
             if not raw_text.strip():
                 st.warning("No text extracted from dataset files.")
                 return False
             
             text_chunks = get_text_chunks(raw_text)
             if create_vector_store(text_chunks):
-                st.success("Dataset files processed successfully!")
+                st.success("✅ Dataset files processed successfully!")
                 return True
             return False
     except Exception as e:
@@ -154,51 +184,90 @@ def get_conversational_chain():
     Provide the Section Number for every legal advice.
     Provide Sequential Proceedings for Legal Procedures if to be provided.
     Remember you are an Attorney, so don't provide any other answers that are not related to Law or Legality.
+    
     Context: {context}
     Chat History: {chat_history}
     Question: {question}
+    
     Answer:
     """
     model = ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash-latest",
+        model="gemini-1.5-flash",  # Using stable model name
         temperature=0.3,
-        system_instruction="You are LawMate, a highly experienced attorney providing legal advice based on Indian laws. You will respond to the user's queries by leveraging your legal expertise and the Context Provided.")
+        max_output_tokens=1024,
+        system_instruction="You are LawMate, a highly experienced attorney providing legal advice based on Indian laws. You will respond to the user's queries by leveraging your legal expertise and the Context Provided."
+    )
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "chat_history", "question"])
     chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
     return chain
 
 def user_input(user_question, chat_history):
     try:
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        embeddings = get_embeddings()
         vector_store = FAISS.load_local("Faiss", embeddings, allow_dangerous_deserialization=True)
-        docs = vector_store.similarity_search(user_question)
+        docs = vector_store.similarity_search(user_question, k=4)  # Get top 4 relevant docs
         qa_chain = get_conversational_chain()
-        response = qa_chain({"input_documents": docs, "chat_history": chat_history, "question": user_question}, return_only_outputs=True)["output_text"]
+        response = qa_chain(
+            {"input_documents": docs, "chat_history": chat_history, "question": user_question}, 
+            return_only_outputs=True
+        )["output_text"]
         return response
     except Exception as e:
-        return f"Error processing your question: {str(e)}. Please try again or rephrase your question."
+        st.error(f"Error details: {str(e)}")
+        return f"I apologize, but I encountered an error processing your question. Please try rephrasing or ask a different question."
 
 def main():
-    st.set_page_config("LawMate", page_icon=":scales:")
-    st.header("LawMate :scales:")
-
-    st.sidebar.header("Upload Files")
-    uploaded_files = st.sidebar.file_uploader("Upload PDF and Image files", type=["pdf", "png", "jpg", "jpeg"], accept_multiple_files=True)
+    st.set_page_config("LawMate", page_icon="⚖️")
     
-    if st.sidebar.button("Process Files"):
-        with st.spinner("Processing files..."):
-            ingest_data(uploaded_files)
+    # Custom CSS for better UI
+    st.markdown("""
+        <style>
+        .main {max-width: 1200px;}
+        .stChatMessage {padding: 1rem; border-radius: 0.5rem;}
+        </style>
+    """, unsafe_allow_html=True)
+    
+    st.header("⚖️ LawMate - AI Legal Advisor")
+    st.caption("Legal advice based on Indian laws")
+
+    # Sidebar
+    with st.sidebar:
+        st.header("📁 Document Upload")
+        uploaded_files = st.file_uploader(
+            "Upload PDF and Image files", 
+            type=["pdf", "png", "jpg", "jpeg"], 
+            accept_multiple_files=True,
+            help="Upload legal documents for analysis"
+        )
+        
+        if st.button("⚡ Process Files", type="primary", use_container_width=True):
+            if uploaded_files:
+                ingest_data(uploaded_files)
+            else:
+                st.warning("Please upload files first!")
+        
+        st.divider()
+        
+        # System info
+        if os.path.exists("Faiss"):
+            st.success("✅ Vector Store Ready")
+        else:
+            st.info("📤 Upload documents to start")
+        
+        st.divider()
+        st.caption("💡 Using free local embeddings (HuggingFace)")
     
     # Check if vector store exists, if not try to process dataset
     if not os.path.exists("Faiss"):
-        st.info("Initializing vector store from dataset...")
-        with st.spinner("Processing dataset files..."):
-            ingest_data()
+        if os.path.exists("dataset") and os.listdir("dataset"):
+            with st.spinner("🔄 Initializing from dataset..."):
+                ingest_data()
 
     # Initialize chat history
     if "messages" not in st.session_state:
         st.session_state.messages = [
-            {"role": "assistant", "content": "Hi, I'm LawMate, an AI Legal Advisor."}]
+            {"role": "assistant", "content": "👋 Hi, I'm LawMate, your AI Legal Advisor. I can help you with queries related to Indian law. How can I assist you today?"}
+        ]
 
     # Display chat history
     for message in st.session_state.messages:
@@ -206,27 +275,27 @@ def main():
             st.write(message["content"])
 
     # Get user input
-    user_question = st.chat_input("Type your legal question here:")
+    user_question = st.chat_input("💬 Type your legal question here...")
     
     if user_question:
         # Check if vector store exists
         if not os.path.exists("Faiss"):
-            st.warning("Please upload and process files first before asking questions.")
+            st.warning("⚠️ Please upload and process files first before asking questions.")
         else:
             st.session_state.messages.append({"role": "user", "content": user_question})
             with st.chat_message("user"):
                 st.write(user_question)
 
-            if st.session_state.messages[-1]["role"] != "assistant":
-                with st.chat_message("assistant"):
-                    with st.spinner("Thinking..."):
-                        chat_history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in st.session_state.messages])
-                        response = user_input(user_question, chat_history)
-                        st.write(response)
+            with st.chat_message("assistant"):
+                with st.spinner("🤔 Analyzing..."):
+                    # Get last 10 messages for context
+                    recent_messages = st.session_state.messages[-10:]
+                    chat_history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in recent_messages])
+                    response = user_input(user_question, chat_history)
+                    st.write(response)
 
-                if response is not None:
-                    message = {"role": "assistant", "content": response}
-                    st.session_state.messages.append(message)
+            if response:
+                st.session_state.messages.append({"role": "assistant", "content": response})
 
 if __name__ == "__main__":
     main()
